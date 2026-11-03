@@ -1,104 +1,46 @@
-# IRC Python Client
+# IRC Python — Secure Terminal Client
 
-A lightweight command-line IRC client built in **Python** with **Rich** for colorful and formatted output.  
-Supports real-time chat, multiple IRC commands, and clean exit handling.  
+Developer: Hamdy Abou El Anein
+Contact: hamdy.aea@protonmail.com
+License: GNU GPL v3 (see LICENSE).
 
----
+A small terminal IRC client using Python 3, Rich and the standard library.
 
-## Features
+## Improvements
 
-- Connect to any IRC server with a nickname.
-- Colorful and formatted output using [Rich](https://rich.readthedocs.io/).  
-- Real-time message reception and sending.  
-- Supports common IRC commands:
-  - `/join <channel>` — join a channel  
-  - `/part` — leave a channel  
-  - `/list` — list available channels  
-  - `/nick <newnick>` — change your nickname  
-  - `/msg <target> <message>` — send a private message  
-  - `/nickserv <command>` — interact with NickServ (identify, ghost, etc.)  
-  - `/quit` — disconnect gracefully  
-- Automatic handling of **JOIN confirmation** before sending messages.  
-- Proper handling of **Ctrl+C** to quit Python cleanly.  
+- **TLS certificate verification enabled by default**, using port 6697.
+- Correct IRC line framing even when TCP splits or combines messages.
+- Automatic `PING/PONG`, join channel after server welcome (`001`).
+- Explicit command validation and CRLF injection protection.
+- Proper socket cleanup and error handling; no connection on module import.
+- `/nickserv` prompts privately for a password rather than storing it.
+- No global state and no absolute paths; config is relative to the script.
+- Protocol and configuration unit tests without a network connection.
 
----
+## Install and run
 
-## Requirements
-
-- Python 3.8+
-- [Rich](https://pypi.org/project/rich/) for colored console output  
-
-Dependencies are listed in `requirements.txt`:
-
-```text
-rich
-
-## Setup   
-
-Clone this repository:
-
-git clone <repository_url>
-cd <repository_folder>
-
-
-Create a virtual environment:
-
-python3 -m venv myenv
-
-
-Activate the virtual environment:
-
-On Linux/macOS:
-
-source myenv/bin/activate
-
-
-On Windows (PowerShell):
-
-.\myenv\Scripts\Activate.ps1
-
-
-## Install dependencies:   
-
-pip install -r requirements.txt
-
-## Configuration  
-
-Edit config.ini to set your IRC server, port, nickname, channel, and real name:
-
-[IRC]
-server = irc.libera.chat
-port = 6667
-nick = your_nick
-channel = #yourchannel
-realname = Your Name
-
-## Usage   
-
-Run the client:
-
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt
+# Edit config.ini and set your nickname and channel.
 python ircpython.py
+```
 
+Supported commands: `/join #channel`, `/part`, `/list`,
+`/nick nickname`, `/msg nickname text`, `/nickserv`, `/quit`.
 
-Once connected:
+To use another config: `python ircpython.py --config /path/to/config.ini`.
+If your IRC network requires plaintext (not recommended), set
+`tls = false` and use the appropriate server port.
 
-Type messages to send to the current channel.
+## Tests
 
-Use / commands to interact with IRC.
+```sh
+python3 -m unittest discover -s tests -v
+```
 
-Example:
+All tests use fake sockets. They do not contact an IRC server.
+Live network interoperability must be tested separately.
 
-/nick NewNick
-/join #otherchannel
-/msg Friend Hello there!
-/quit
-
-Notes
-
-The first message will now always display the channel correctly, thanks to automatic JOIN confirmation handling.
-
-Proper identification with NickServ is recommended on networks like Libera Chat:
-
-/msg NickServ IDENTIFY <nick> <password>
-
-
+The historical 2026 version is preserved in Git branch `old`.

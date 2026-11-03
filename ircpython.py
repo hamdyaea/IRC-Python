@@ -1,173 +1,174 @@
 #!/usr/bin/env python3
-'''
-Name: Hamdy Abou El Anein
-Email: hamdy.aea@protonmail.com 
-Date of creation:  14-02-2026
-Last update: 14-02-2026
-Version: 1.0
-Description: A IRC client in Python  
-'''
+# Developer: Hamdy Abou El Anein
+# Contact: hamdy.aea@protonmail.com
+# Copyright (C) 2026 Hamdy Abou El Anein
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Interactive IRC client with TLS, proper line framing and safe commands."""
+from __future__ import annotations
 
-import socket
-import threading
-import sys
-import configparser
-import signal
-from rich.console import Console
-from rich.markup import escape
-from rich.prompt import Prompt
+import argparse
 from datetime import datetime
+import getpass
+from pathlib import Path
+import socket
+import ssl
+import sys
+import threading
 
-# ---------------------------
-# Global variables
-# ---------------------------
-console = Console()
-running = True
-CHANNEL = None  # will be set from config
-irc = None
+from irc_core import load_settings, outgoing, parse_line, safe_text, valid_channel, valid_token
 
-# ---------------------------
-# Handle Ctrl+C
-# ---------------------------
-def signal_handler(sig, frame):
-    global running, irc
-    console.print("\n[bold red]Graceful disconnect...[/bold red]")
-    running = False
-    try:
-        if irc:
-            irc.send("QUIT :Client closed\r\n".encode())
-            irc.close()
-    except:
-        pass
-    sys.exit(0)
+DEFAULT_CONFIG = Path(__file__).resolve().with_name("config.ini")
 
-signal.signal(signal.SIGINT, signal_handler)
 
-# ---------------------------
-# Read config
-# ---------------------------
-config = configparser.ConfigParser()
-config.read("config.ini")
+class IRCClient:
+    def __init__(self, settings, console):
+        self.settings = settings
+        self.console = console
+        self.channel = settings.channel
+        self.socket = None
+        self.lock = threading.Lock()
+        self.stop = threading.Event()
 
-SERVER = config["IRC"]["server"]
-PORT = int(config["IRC"]["port"])
-NICK = config["IRC"]["nick"]
-CHANNEL = config["IRC"]["channel"]
-REALNAME = config["IRC"]["realname"]
-
-# ---------------------------
-# Connect to IRC server
-# ---------------------------
-irc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-irc.connect((SERVER, PORT))
-irc.send(f"NICK {NICK}\r\n".encode())
-irc.send(f"USER {NICK} 0 * :{REALNAME}\r\n".encode())
-
-# ---------------------------
-# Display messages with Rich
-# ---------------------------
-def display_message(msg):
-    msg = msg.strip()
-    timestamp = datetime.now().strftime("%H:%M:%S")
-
-    if "PRIVMSG" in msg:
+    def connect(self):
+        raw = socket.create_connection((self.settings.server, self.settings.port), timeout=15)
         try:
-            parts = msg.split(":", 2)
-            if len(parts) >= 3:
-                prefix = parts[1].split("!")[0]  # nick
-                message = parts[2]
-                channel = msg.split()[2]
-                console.print(f"[bold blue][{channel}][/bold blue] [green]{prefix}[/green]: {escape(message)} [{timestamp}]")
-        except:
-            console.print(f"[yellow]{escape(msg)} [{timestamp}][/yellow]")
-    else:
-        # System messages
-        console.print(f"[yellow]{escape(msg)} [{timestamp}][/yellow]")
-
-# ---------------------------
-# Receive messages
-# ---------------------------
-def receive_messages():
-    global running
-    while running:
-        try:
-            msg = irc.recv(4096).decode("utf-8", errors="ignore")
-            if not msg:
-                break
-            if msg.startswith("PING"):
-                irc.send(f"PONG {msg.split()[1]}\r\n".encode())
-            else:
-                display_message(msg)
-        except:
-            break
-
-# ---------------------------
-# Send messages
-# ---------------------------
-def send_messages():
-    global running, CHANNEL
-    while running:
-        try:
-            msg = Prompt.ask(f"[bold magenta]{CHANNEL}[/bold magenta] >")
-            if msg.startswith("/"):
-                handle_command(msg)
-            else:
-                irc.send(f"PRIVMSG {CHANNEL} :{msg}\r\n".encode())
-        except EOFError:
-            break
+            if self.settings.tls:
+                raw = ssl.create_default_context().wrap_socket(
+                    raw, server_hostname=self.settings.server
+                )
+            raw.settimeout(None)
+            self.socket = raw
         except Exception:
-            break
+            raw.close()
+            raise
+        self.send("NICK", self.settings.nick)
+        self.send("USER", self.settings.nick, "0", "*",
+                  trailing=self.settings.realname)
 
-# ---------------------------
-# Handle IRC commands
-# ---------------------------
-def handle_command(cmd):
-    global CHANNEL, running
-    parts = cmd.split()
-    if len(parts) == 0:
-        return
+    def send(self, command, *params, trailing=None):
+        packet = outgoing(command, *params, trailing=trailing)
+        with self.lock:
+            if self.socket is None:
+                raise ConnectionError("Not connected.")
+            self.socket.sendall(packet)
 
-    if parts[0] == "/join" and len(parts) > 1:
-        CHANNEL = parts[1]
-        irc.send(f"JOIN {CHANNEL}\r\n".encode())
-    elif parts[0] == "/part":
-        irc.send(f"PART {CHANNEL}\r\n".encode())
-    elif parts[0] == "/list":
-        irc.send("LIST\r\n".encode())
-    elif parts[0] == "/nick" and len(parts) > 1:
-        irc.send(f"NICK {parts[1]}\r\n".encode())
-    elif parts[0] == "/msg" and len(parts) > 2:
-        target = parts[1]
-        message = " ".join(parts[2:])
-        irc.send(f"PRIVMSG {target} :{message}\r\n".encode())
-    elif parts[0] == "/quit":
-        irc.send("QUIT :Client closed\r\n".encode())
-        running = False
-    elif parts[0] == "/nickserv" and len(parts) > 1:
-        irc.send(f"PRIVMSG NickServ :{' '.join(parts[1:])}\r\n".encode())
-    else:
-        console.print("[red]Unknown command[/red]")
+    def receive(self):
+        try:
+            # File iterator buffers partial/multiple TCP messages correctly.
+            with self.socket.makefile("r", encoding="utf-8", errors="replace", newline="\n") as reader:
+                for line in reader:
+                    if self.stop.is_set():
+                        break
+                    prefix, command, params = parse_line(line)
+                    if command == "PING":
+                        self.send("PONG", trailing=params[-1] if params else "")
+                    elif command == "001":
+                        self.send("JOIN", self.channel)
+                    elif command == "PRIVMSG" and len(params) >= 2:
+                        sender = (prefix or "").split("!", 1)[0]
+                        self.show(f"[{params[0]}] {sender}: {params[1]}")
+                    elif command:
+                        self.show(line.strip())
+        except (OSError, ConnectionError) as exc:
+            if not self.stop.is_set():
+                self.show(f"Connection closed: {type(exc).__name__}")
+        finally:
+            self.stop.set()
 
-# ---------------------------
-# Start threads
-# ---------------------------
-recv_thread = threading.Thread(target=receive_messages)
-recv_thread.daemon = True
-recv_thread.start()
+    def show(self, message):
+        from rich.markup import escape
+        stamp = datetime.now().strftime("%H:%M:%S")
+        self.console.print(f"[dim]{stamp}[/dim] {escape(message)}")
 
-send_thread = threading.Thread(target=send_messages)
-send_thread.daemon = True
-send_thread.start()
+    def handle_input(self, line):
+        line = safe_text(line)
+        if not line:
+            return
+        if not line.startswith("/"):
+            self.send("PRIVMSG", self.channel, trailing=line)
+            return
+        command, _, rest = line[1:].partition(" ")
+        cmd = command.lower()
+        rest = rest.strip()
+        if cmd == "join" and rest:
+            self.channel = valid_channel(rest)
+            self.send("JOIN", self.channel)
+        elif cmd == "part":
+            self.send("PART", self.channel)
+        elif cmd == "list":
+            self.send("LIST")
+        elif cmd == "nick" and rest:
+            self.send("NICK", valid_token(rest))
+        elif cmd == "msg" and " " in rest:
+            target, message = rest.split(" ", 1)
+            if target.startswith(("#", "&")):
+                valid_channel(target)
+            else:
+                valid_token(target)
+            self.send("PRIVMSG", target, trailing=message)
+        elif cmd == "nickserv":
+            # Never echo a password to the terminal or store it in config.ini.
+            password = getpass.getpass("NickServ password: ")
+            if password:
+                self.send("PRIVMSG", "NickServ", trailing="IDENTIFY " + safe_text(password))
+        elif cmd == "quit":
+            self.close()
+        else:
+            self.show("Commands: /join #channel, /part, /list, /nick N, /msg N text, /nickserv, /quit")
 
-# ---------------------------
-# Keep program alive
-# ---------------------------
-try:
-    recv_thread.join()
-    send_thread.join()
-except KeyboardInterrupt:
-    signal_handler(None, None)
+    def close(self):
+        already_stopped = self.stop.is_set()
+        self.stop.set()
+        if not already_stopped:
+            try:
+                self.send("QUIT", trailing="Client closed")
+            except (OSError, ConnectionError):
+                pass
+        if self.socket:
+            try:
+                self.socket.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            self.socket.close()
+            self.socket = None
 
-irc.close()
-sys.exit(0)
 
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    args = parser.parse_args(argv)
+    try:
+        from rich.console import Console
+        from rich.prompt import Prompt
+    except ImportError:
+        print("Install dependencies with: python -m pip install -r requirements.txt", file=sys.stderr)
+        return 2
+    console = Console()
+    try:
+        settings = load_settings(args.config)
+        client = IRCClient(settings, console)
+        client.connect()
+    except (OSError, ValueError, ssl.SSLError) as exc:
+        console.print(f"[red]Unable to connect: {type(exc).__name__}[/red]")
+        return 1
+    receiver = threading.Thread(target=client.receive, daemon=True)
+    receiver.start()
+    console.print(f"Connected to {settings.server}:{settings.port} (TLS={settings.tls}).")
+    try:
+        while not client.stop.is_set():
+            try:
+                client.handle_input(Prompt.ask(f"[magenta]{client.channel}[/magenta]"))
+            except ValueError as exc:
+                client.show(f"Invalid input: {exc}")
+            except (OSError, ConnectionError):
+                break
+    except (KeyboardInterrupt, EOFError):
+        pass
+    finally:
+        client.close()
+        receiver.join(timeout=2)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
